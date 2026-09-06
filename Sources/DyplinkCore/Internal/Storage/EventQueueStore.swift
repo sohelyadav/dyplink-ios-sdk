@@ -78,7 +78,10 @@ internal final class EventQueueStore {
 
     /// Return up to `batchSize` entries whose `nextRetryAt` is in the
     /// past, sorted by `createdAt ASC`.
-    func getNextBatch(now: Int64 = Self.nowMillis(), batchSize: Int = 50) -> [EventQueueEntry] {
+    // Named concretely rather than `Self`: a covariant `Self` cannot be
+    // referenced from a default argument expression, which fails the build on
+    // current Swift. The class is final, so the two are equivalent here.
+    func getNextBatch(now: Int64 = EventQueueStore.nowMillis(), batchSize: Int = 50) -> [EventQueueEntry] {
         lock.lock(); defer { lock.unlock() }
         let ready = entries.filter { $0.nextRetryAt <= now }
             .sorted { $0.createdAt < $1.createdAt }
