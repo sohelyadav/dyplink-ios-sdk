@@ -235,18 +235,35 @@ public final class Dyplink: @unchecked Sendable {
         try? checkInitialized()
         guard let result = universalLinkParser?.parse(url) else { return nil }
 
-        // Notify listeners
-        onDeepLink?(result)
-        if let listener = deepLinkListener {
-            listener.dyplink(self, didReceive: result)
-        }
+        notifyDeepLinkListeners(result)
+        trackDeepLinkOpened(result)
 
-        // Auto-track the open
-        track("deep_link_opened", properties: [
-            "url": result.url,
-            "short_code": result.shortCode ?? "",
-            "is_deferred": result.isDeferred,
-        ])
+        return result
+    }
+
+    /// Handle a deep link destination that arrived out of band — the URL a
+    /// push campaign carries, for example — and notify listeners.
+    ///
+    /// Unlike `handleDeepLink(url:)` this never drops the URL. A campaign
+    /// destination is usually a plain app URL (`myapp://product/42`,
+    /// `https://shop.example.com/sale`) rather than a Dyplink short link, and
+    /// Android opens whatever URL the campaign carries. So: parse when the URL
+    /// is a recognized Dyplink link — keeping `shortCode`, `params` and
+    /// `linkId` — and pass it through as a bare `DeepLinkResult` when it is
+    /// not. The returned result is never `nil`.
+    ///
+    /// Use this only for URLs already known to be meant for this app.
+    /// `handleDeepLink(url:)` returns `nil` for unrecognized URLs by design —
+    /// Universal Link callers depend on that to leave links belonging to other
+    /// handlers alone — so it is the wrong entry point here.
+    @discardableResult
+    public func handleCampaignDeepLink(url: URL) -> DeepLinkResult {
+        try? checkInitialized()
+        let result = universalLinkParser?.parse(url)
+            ?? DeepLinkResult(url: url.absoluteString, isDeferred: false)
+
+        notifyDeepLinkListeners(result)
+        trackDeepLinkOpened(result)
 
         return result
     }
@@ -268,10 +285,7 @@ public final class Dyplink: @unchecked Sendable {
                 isDeferred: true,
                 linkId: result.linkId
             )
-            onDeepLink?(deepLinkResult)
-            if let listener = deepLinkListener {
-                listener.dyplink(self, didReceive: deepLinkResult)
-            }
+            notifyDeepLinkListeners(deepLinkResult)
         }
         return result
     }
@@ -302,6 +316,24 @@ public final class Dyplink: @unchecked Sendable {
     }
 
     // ── Internal helpers ───────────────────────────────────────────────
+
+    /// Fan a resolved deep link out to whichever listener the host app set.
+    /// Both are supported and independent, so both are offered the result.
+    private func notifyDeepLinkListeners(_ result: DeepLinkResult) {
+        onDeepLink?(result)
+        if let listener = deepLinkListener {
+            listener.dyplink(self, didReceive: result)
+        }
+    }
+
+    /// Auto-track an opened deep link.
+    private func trackDeepLinkOpened(_ result: DeepLinkResult) {
+        track("deep_link_opened", properties: [
+            "url": result.url,
+            "short_code": result.shortCode ?? "",
+            "is_deferred": result.isDeferred,
+        ])
+    }
 
     private func checkInitialized() throws {
         lock.lock(); defer { lock.unlock() }

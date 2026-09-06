@@ -48,6 +48,11 @@ let package = Package(
             dependencies: ["DyplinkCore"],
             path: "Sources/DyplinkPush"
         ),
+        .testTarget(
+            name: "DyplinkPushTests",
+            dependencies: ["DyplinkPush", "DyplinkCore"],
+            path: "Tests/DyplinkPushTests"
+        ),
 
         // ── Banners ────────────────────────────────────────────────────
         .target(
