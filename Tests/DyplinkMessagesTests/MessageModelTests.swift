@@ -1,5 +1,8 @@
 import XCTest
-import DyplinkMessages
+// @testable: the test builds an InAppMessage directly, and its memberwise
+// init is internal — a plain import cannot see it, so this target has never
+// compiled and the package's test action has been red since the file landed.
+@testable import DyplinkMessages
 
 final class MessageModelTests: XCTestCase {
     func testInAppMessageInit() {
