@@ -38,6 +38,15 @@ import UserNotifications
 ///   `com.example.app.NotificationService` for an app id of `com.example.app`.
 /// - Its deployment target must not be higher than the app's, or devices on
 ///   older iOS versions install the app without the extension.
+///
+/// Linking `DyplinkPush` into the extension also links `DyplinkCore`, even
+/// though nothing here needs the SDK to have been initialised. Notification
+/// service extensions run under a far tighter memory limit than the app, so if
+/// one is ever killed for memory rather than time, that is the first thing to
+/// weigh — the fix would be moving this helper to a target of its own, not
+/// changing the extension. Verified extension-safe: the module builds with
+/// `APPLICATION_EXTENSION_API_ONLY=YES`, and nothing in either module reaches
+/// for `UIApplication.shared`.
 public enum DyplinkNotificationService {
 
     /// Key under which a Dyplink campaign carries its image URL. Matches
