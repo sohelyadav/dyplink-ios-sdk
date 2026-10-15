@@ -12,6 +12,10 @@ internal final class MessageManager {
     let distinctIdProvider: () -> String?
     weak var messageListener: MessageListener?
 
+    /// Presenters for the messages currently on screen. Each owns the window
+    /// its message lives in, so something has to hold them.
+    private var presenters: [InAppMessagePresenter] = []
+
     init(
         apiClient: MessageApiClient,
         projectId: String,
@@ -47,44 +51,75 @@ internal final class MessageManager {
             try? await Task.sleep(nanoseconds: UInt64(message.triggerDelay) * 1_000_000_000)
         }
 
-        // Record impression.
-        Task {
+        report(message, eventType: "impression")
+
+        let presenter = InAppMessagePresenter(message: message) { [weak self] outcome in
+            self?.handle(outcome, for: message)
+        }
+        // Nothing else holds the presenter, and it owns the window the
+        // message lives in — dropping it here would take the message with it.
+        presenters.append(presenter)
+        presenter.present()
+    }
+
+    /// Records the outcome and lets the host app act on it.
+    @MainActor
+    private func handle(_ outcome: InAppMessagePresenter.Outcome, for message: InAppMessage) {
+        presenters.removeAll { $0.isFinished }
+
+        switch outcome {
+        case .dismissed:
+            report(message, eventType: "dismiss")
+
+        case .autoDismissed:
+            report(message, eventType: "auto_dismiss")
+
+        case .buttonTapped(let button):
+            // `cta_click`, not `click`, and this is the reason: the
+            // dashboard's per-button breakdown counts `cta_click` rows
+            // alone, so for as long as iOS reported `click` its taps were
+            // invisible there while Android's showed up. Both are summed
+            // into the click-through rate, which is why nothing looked
+            // wrong at the top level.
+            report(message, eventType: "cta_click", buttonId: button.id)
+            messageListener?.onButtonAction(message: message, button: button)
+
+            switch button.action {
+            case "deep_link", "url":
+                open(button.actionUrl)
+            case "custom_event":
+                if let event = button.actionEvent {
+                    messageListener?.onCustomEvent(message: message, eventName: event)
+                }
+            default:
+                // `dismiss` has nothing to do beyond closing, which has
+                // already happened.
+                break
+            }
+        }
+    }
+
+    private func report(_ message: InAppMessage, eventType: String, buttonId: String? = nil) {
+        Task { [apiClient, projectId, deviceFingerprint, distinctIdProvider] in
             await apiClient.recordEvent(
                 messageId: message.id,
                 projectId: projectId,
                 deviceFingerprint: deviceFingerprint,
                 distinctId: distinctIdProvider(),
-                eventType: "impression"
+                eventType: eventType,
+                buttonId: buttonId
             )
         }
-        messageListener?.onMessageEvent(message: message, eventType: "impression", buttonId: nil)
+        messageListener?.onMessageEvent(message: message, eventType: eventType, buttonId: buttonId)
+    }
 
-        // Present the in-app message.
-        let presenter = InAppMessagePresenter(message: message) { [weak self] action, button in
-            guard let self = self else { return }
-
-            // Record dismiss/click event.
-            let eventType = (action == "dismiss") ? "dismiss" : "click"
-            Task {
-                await self.apiClient.recordEvent(
-                    messageId: message.id,
-                    projectId: self.projectId,
-                    deviceFingerprint: self.deviceFingerprint,
-                    distinctId: self.distinctIdProvider(),
-                    eventType: eventType,
-                    buttonId: button?.id
-                )
-            }
-            self.messageListener?.onMessageEvent(message: message, eventType: eventType, buttonId: button?.id)
-
-            if let button = button {
-                self.messageListener?.onButtonAction(message: message, button: button)
-                if button.action == "custom_event", let event = button.actionEvent {
-                    self.messageListener?.onCustomEvent(message: message, eventName: event)
-                }
-            }
-        }
-        presenter.present()
+    /// Opens a button's destination, the way the Android SDK's
+    /// `ACTION_VIEW` does. `onButtonAction` has already run, so a host app
+    /// that routes its own deep links has had its chance first.
+    @MainActor
+    private func open(_ raw: String?) {
+        guard let raw = raw, let url = URL(string: raw) else { return }
+        UIApplication.shared.open(url)
     }
 }
 #endif
