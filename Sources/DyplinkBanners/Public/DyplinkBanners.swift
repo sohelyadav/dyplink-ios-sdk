@@ -25,19 +25,12 @@ public final class DyplinkBanners: @unchecked Sendable {
         precondition(Dyplink.shared.isInitialized,
                      "Dyplink.shared.initialize(config:) must be called first")
 
-        lock.lock()
-        if let cached = cache[categoryId] {
-            lock.unlock()
+        if let cached = cachedCategory(categoryId) {
             return cached
         }
-        lock.unlock()
 
         let category = try await apiClient.fetchBanners(categoryId: categoryId)
-
-        lock.lock()
-        cache[categoryId] = category
-        lock.unlock()
-
+        store(category, as: categoryId)
         return category
     }
 
@@ -49,5 +42,23 @@ public final class DyplinkBanners: @unchecked Sendable {
         #if canImport(UIKit)
         BannerImageLoader.shared.clearCache()
         #endif
+    }
+
+    // ── Cache ──────────────────────────────────────────────────────────
+
+    /// Both halves of the cache are reached through synchronous methods
+    /// rather than locking inside `loadBanners`: `NSLock.lock()` is
+    /// unavailable from an async context, because a lock held across an
+    /// `await` can deadlock when the continuation resumes on the thread
+    /// holding it. Nothing here is held across the fetch — that is exactly
+    /// why it can be split in two.
+    private func cachedCategory(_ categoryId: String) -> BannerCategory? {
+        lock.lock(); defer { lock.unlock() }
+        return cache[categoryId]
+    }
+
+    private func store(_ category: BannerCategory, as categoryId: String) {
+        lock.lock(); defer { lock.unlock() }
+        cache[categoryId] = category
     }
 }
