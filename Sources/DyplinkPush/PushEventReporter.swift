@@ -11,13 +11,13 @@ internal final class PushEventReporter {
 
     /// POST a single engagement event to `/api/push-notifications/events`.
     /// Never throws.
-    func report(campaignId: String, type: String) async {
+    func report(campaignId: String, type: String, actionId: String? = nil) async {
         let baseUrl = DyplinkConfigBridge.baseUrl
         let apiKey = DyplinkConfigBridge.apiKey
         let projectId = DyplinkConfigBridge.projectId
         let fingerprint = DyplinkConfigBridge.deviceFingerprint
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "projectId": projectId,
             "campaignId": campaignId,
             "deviceFingerprint": fingerprint,
@@ -25,10 +25,22 @@ internal final class PushEventReporter {
             "platform": "ios",
             "occurredAt": Self.iso8601Now(),
         ]
+        // Which button, when it was a button. The same shape Android's
+        // `PushEventReporter` sends, because one campaign's numbers are read
+        // in one report: the server stores this on the event, and a report
+        // that separates the two platforms' field names separates nothing.
+        if let actionId = actionId {
+            body["metadata"] = ["actionId": actionId]
+        }
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: body),
               let url = URL(string: "\(baseUrl)/api/push-notifications/events")
-        else { return }
+        else {
+            DyplinkDiagnostics.warn(
+                "Push \(type) for campaign \(campaignId) not reported: \(baseUrl) is not a usable base URL"
+            )
+            return
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -37,7 +49,25 @@ internal final class PushEventReporter {
         request.addValue(apiKey, forHTTPHeaderField: "X-API-Key")
         request.timeoutInterval = 15
 
-        _ = try? await URLSession.shared.data(for: request)
+        // Still fire-and-forget — a lost report must not disturb the
+        // notification it belongs to — but no longer silent. `_ = try? await`
+        // was how a campaign whose every event the server rejected read as a
+        // campaign nobody had engaged with.
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                DyplinkDiagnostics.httpFailure(
+                    "POST /api/push-notifications/events (\(type))",
+                    statusCode: http.statusCode,
+                    body: data
+                )
+            }
+        } catch {
+            DyplinkDiagnostics.transportFailure(
+                "POST /api/push-notifications/events (\(type))",
+                error
+            )
+        }
     }
 
     private static func iso8601Now() -> String {

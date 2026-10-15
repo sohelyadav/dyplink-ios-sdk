@@ -41,20 +41,27 @@ internal final class PushTokenManager {
         request.addValue(apiKey, forHTTPHeaderField: "X-API-Key")
         request.timeoutInterval = 15
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw DyplinkError.networkError(message: "Non-HTTP response")
         }
         guard (200...299).contains(http.statusCode) else {
+            // The body says *why* the registration was refused — a project
+            // mismatch reads nothing like a malformed token — so it travels
+            // with the error rather than being dropped on the floor.
+            DyplinkDiagnostics.httpFailure(
+                "POST /api/push-tokens/register",
+                statusCode: http.statusCode,
+                body: data
+            )
             throw DyplinkError.apiError(
                 message: "Push token registration failed",
-                statusCode: http.statusCode
+                statusCode: http.statusCode,
+                responseBody: String(data: data, encoding: .utf8)
             )
         }
 
-        lock.lock()
-        currentToken = token
-        lock.unlock()
+        setCurrentToken(token)
     }
 
     /// Unregister the current token from the backend.
@@ -63,11 +70,7 @@ internal final class PushTokenManager {
         let apiKey = DyplinkConfigBridge.apiKey
         let projectId = DyplinkConfigBridge.projectId
 
-        lock.lock()
-        let token = currentToken
-        lock.unlock()
-
-        guard let token = token else { return }
+        guard let token = currentTokenValue() else { return }
 
         var components = URLComponents(string: "\(baseUrl)/api/push-tokens/unregister")
         components?.queryItems = [
@@ -82,16 +85,38 @@ internal final class PushTokenManager {
         request.timeoutInterval = 15
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                // Log but don't rethrow — best effort
+                // Best effort, but not silent: a token the backend still
+                // believes in goes on receiving campaigns after a logout.
+                DyplinkDiagnostics.httpFailure(
+                    "DELETE /api/push-tokens/unregister",
+                    statusCode: http.statusCode,
+                    body: data
+                )
             }
         } catch {
-            // Swallow — local state is cleared regardless
+            // Swallow — local state is cleared regardless.
+            DyplinkDiagnostics.transportFailure("DELETE /api/push-tokens/unregister", error)
         }
 
-        lock.lock()
-        currentToken = nil
-        lock.unlock()
+        setCurrentToken(nil)
+    }
+
+    // ── Token state ────────────────────────────────────────────────────
+
+    /// Reading and writing the token happen in synchronous methods of their
+    /// own because `NSLock.lock()` is unavailable from an async context: a
+    /// lock held across an `await` can deadlock when the continuation
+    /// resumes on the thread holding it. Neither of these holds it across
+    /// the request, which is what makes the split possible at all.
+    private func currentTokenValue() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return currentToken
+    }
+
+    private func setCurrentToken(_ token: String?) {
+        lock.lock(); defer { lock.unlock() }
+        currentToken = token
     }
 }

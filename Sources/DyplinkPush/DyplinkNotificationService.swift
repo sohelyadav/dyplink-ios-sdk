@@ -82,29 +82,76 @@ public enum DyplinkNotificationService {
 
     // ── Entry point ────────────────────────────────────────────────────
 
-    /// Attaches the campaign's image to `request`'s content, if the payload
-    /// carries one, and hands the result to `contentHandler`.
+    /// Attaches the campaign's image and action buttons to `request`'s
+    /// content, as far as the payload carries either, and hands the result to
+    /// `contentHandler`.
     ///
     /// Call this from `didReceive(_:withContentHandler:)` and do nothing
     /// else — the handler is invoked exactly once on every path, including
     /// each of the ones that give up.
     ///
-    /// A push with no `dyplink_image_url` is passed straight through without
-    /// waiting on anything, and any failure along the way — an unreachable
-    /// host, a timeout, a response that isn't an image, an attachment the OS
-    /// rejects — delivers the original notification untouched.
+    /// A push with neither `dyplink_image_url` nor `dyplink_actions` is
+    /// passed straight through without waiting on anything, and any failure
+    /// along the way — an unreachable host, a timeout, a response that isn't
+    /// an image, an attachment the OS rejects — delivers the notification
+    /// with whatever else did succeed.
     public static func populate(
         _ request: UNNotificationRequest,
         withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
-        let delivery = ContentDelivery(original: request.content, handler: contentHandler)
+        populate(request, registry: nil, withContentHandler: contentHandler)
+    }
 
-        // Most pushes carry no image at all. Holding one back while an
-        // extension we have nothing to add for wakes up and starts a network
-        // stack is worse than not running an extension in the first place,
-        // so this path never leaves the calling thread.
+    /// The same, against a given category registry.
+    ///
+    /// Internal, and only so the buttons can be registered without
+    /// `UNUserNotificationCenter.current()`, which cannot be constructed and
+    /// traps in a test bundle with no host app.
+    internal static func populate(
+        _ request: UNNotificationRequest,
+        registry: NotificationCategoryRegistry?,
+        withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
+    ) {
+        let delivery = ContentDelivery(original: request.content, handler: contentHandler)
+        let actions = DyplinkPushActions.actions(in: request.content.userInfo)
+
+        // Most pushes carry neither. Holding one back while an extension we
+        // have nothing to add for wakes up and starts a network stack is
+        // worse than not running an extension in the first place, so this
+        // path never leaves the calling thread.
+        guard !actions.isEmpty else {
+            attachImage(for: request, categoryIdentifier: nil, delivery: delivery)
+            return
+        }
+
+        // Before the notification is shown, and before anything slow: iOS
+        // draws the buttons of the category the content names, and a
+        // category that is registered a moment too late draws none.
+        //
+        // The campaign's own `aps.category` is offered as the identifier to
+        // register them under — it arrives here as
+        // `content.categoryIdentifier` — so a campaign that carries both a
+        // category and buttons keeps the category, and with it the content
+        // extension that draws its carousel or countdown.
+        DyplinkPushActions.registerCategory(
+            for: actions,
+            preferredIdentifier: request.content.categoryIdentifier,
+            registry: registry
+        ) { categoryIdentifier in
+            attachImage(for: request, categoryIdentifier: categoryIdentifier, delivery: delivery)
+        }
+    }
+
+    /// Downloads and attaches the campaign's image, carrying
+    /// `categoryIdentifier` through onto whatever is finally delivered.
+    private static func attachImage(
+        for request: UNNotificationRequest,
+        categoryIdentifier: String?,
+        delivery: ContentDelivery
+    ) {
         guard let imageUrl = imageUrl(in: request.content.userInfo) else {
-            delivery.deliverOriginal()
+            // Nothing to fetch, but possibly still buttons to name.
+            delivery.deliverOriginal(categoryIdentifier: categoryIdentifier)
             return
         }
 
@@ -112,14 +159,18 @@ public enum DyplinkNotificationService {
         downloadRequest.timeoutInterval = downloadTimeout
 
         URLSession.shared.dataTask(with: downloadRequest) { data, response, _ in
-            guard let attachment = makeAttachment(data: data, response: response, url: imageUrl),
-                  let content = delivery.mutableCopyOfOriginal()
-            else {
-                delivery.deliverOriginal()
+            guard let content = delivery.mutableCopyOfOriginal() else {
+                delivery.deliverOriginal(categoryIdentifier: categoryIdentifier)
                 return
             }
-
-            content.attachments = [attachment]
+            // The two are independent: a picture that failed to download
+            // must not cost the campaign its buttons, and vice versa.
+            if let categoryIdentifier = categoryIdentifier {
+                content.categoryIdentifier = categoryIdentifier
+            }
+            if let attachment = makeAttachment(data: data, response: response, url: imageUrl) {
+                content.attachments = [attachment]
+            }
             delivery.deliver(content)
         }.resume()
     }
@@ -219,9 +270,21 @@ private final class ContentDelivery: @unchecked Sendable {
         handler?(content)
     }
 
-    /// The fallback every failure takes: show the notification as it arrived.
-    func deliverOriginal() {
-        deliver(original)
+    /// The fallback every failure takes: show the notification as it
+    /// arrived, named onto its category when there is one.
+    ///
+    /// Naming the category needs a mutable copy, and the OS declining to
+    /// give one is not a reason to deliver nothing — the notification
+    /// without its buttons is the right answer then.
+    func deliverOriginal(categoryIdentifier: String? = nil) {
+        guard let categoryIdentifier = categoryIdentifier,
+              let content = mutableCopyOfOriginal()
+        else {
+            deliver(original)
+            return
+        }
+        content.categoryIdentifier = categoryIdentifier
+        deliver(content)
     }
 
     /// A mutable copy of the notification to attach the image to, or `nil`
