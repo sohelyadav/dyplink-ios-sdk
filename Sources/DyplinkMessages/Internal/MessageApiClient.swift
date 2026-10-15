@@ -56,11 +56,7 @@ internal final class MessageApiClient {
             throw DyplinkError.apiError(message: "checkMessages failed", statusCode: code)
         }
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let messagesArray = json["messages"] as? [[String: Any]]
-        else { return [] }
-
-        return messagesArray.map(Self.parseMessage)
+        return Self.parseMessages(from: data)
     }
 
     func recordEvent(
@@ -98,6 +94,25 @@ internal final class MessageApiClient {
     }
 
     // ── Parsing ────────────────────────────────────────────────────────
+
+    /// Reads the eligible messages out of a `/api/messages/check` body.
+    ///
+    /// The API wraps every response in `{ "data": … }`. Reading `messages`
+    /// off the root finds nothing and looks exactly like "no messages are
+    /// eligible" — so for as long as this read the root directly, nothing
+    /// ever displayed and nothing ever complained. Falling back to the root
+    /// keeps an unwrapped body working.
+    ///
+    /// Anything unreadable yields no messages rather than an error: there is
+    /// nothing the host app could do about a malformed check.
+    internal static func parseMessages(from data: Data) -> [InAppMessage] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+        let json = (root["data"] as? [String: Any]) ?? root
+        guard let messagesArray = json["messages"] as? [[String: Any]] else { return [] }
+        return messagesArray.map(parseMessage)
+    }
 
     private static func parseMessage(_ json: [String: Any]) -> InAppMessage {
         InAppMessage(

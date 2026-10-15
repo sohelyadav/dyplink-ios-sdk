@@ -48,6 +48,8 @@ internal final class BannerApiClient {
             throw DyplinkError.apiError(message: "Invalid banner JSON", statusCode: 0)
         }
 
+        // Every API response is wrapped in `{ "data": … }`; falling back
+        // to the root keeps an unwrapped body working.
         let wrapped = (root["data"] as? [String: Any]) ?? root
         let categoryJson = (wrapped["category"] as? [String: Any]) ?? wrapped
         let bannersArray = (wrapped["banners"] as? [[String: Any]])

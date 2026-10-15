@@ -51,7 +51,7 @@ internal final class IdentityManager {
             )
         }
 
-        let json = try JSONUtils.decodeObject(response.data)
+        let json = try JSONUtils.decodeEnvelope(response.data)
         let newDistinctId = fingerprintProvider.distinctId
         if newDistinctId != previousDistinctId {
             Task { await self.merge(anonymousId: previousDistinctId, identifiedId: newDistinctId) }

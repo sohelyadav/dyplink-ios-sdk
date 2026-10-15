@@ -35,6 +35,24 @@ internal enum JSONUtils {
         return dict
     }
 
+    /// Decode an API response body, stepping inside the envelope the
+    /// backend wraps every endpoint in.
+    ///
+    /// `TransformInterceptor` on the API returns `{ "data": … }` around
+    /// every response, so a client reading a field at the top level finds
+    /// nothing there and silently falls back to its default — which is how
+    /// a deferred match reads as "not matched" and a list of in-app
+    /// messages reads as empty, with no error anywhere.
+    ///
+    /// Falling back to the root rather than failing is deliberate: the same
+    /// parsers are handed bodies that were never enveloped — anything the
+    /// SDK cached itself, and any endpoint that one day answers unwrapped —
+    /// and those must keep working.
+    static func decodeEnvelope(_ data: Data) throws -> [String: Any] {
+        let root = try decodeObject(data)
+        return root["data"] as? [String: Any] ?? root
+    }
+
     /// Convert a raw JSON value (as returned by `JSONSerialization`) to
     /// a `[String: AnyJSONValue]` map. Values that aren't objects are
     /// silently dropped.

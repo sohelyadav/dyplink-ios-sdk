@@ -64,7 +64,7 @@ internal final class DeferredDeepLinkMatcher {
         let data = try JSONUtils.encode(body)
         let response = try await requestExecutor.post("/api/deferred/match", jsonBody: data)
 
-        let json = try JSONUtils.decodeObject(response.data)
+        let json = try JSONUtils.decodeEnvelope(response.data)
         let matched = json["matched"] as? Bool ?? false
         let linkId = (json["linkId"] as? String).nonEmpty
         let shortCode = (json["shortCode"] as? String).nonEmpty
