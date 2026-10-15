@@ -45,6 +45,20 @@ internal final class DyplinkPreferences {
         set { defaults.set(newValue, forKey: Keys.deferredMatchResult) }
     }
 
+    /// A short code to offer the server as `cookieRef` on the one deferred
+    /// match this install gets.
+    ///
+    /// iOS has no install referrer, so the fingerprint is all the matcher
+    /// used to have — and a fingerprint match is a correlation over a 48h
+    /// window while `cookieRef` is the link itself. Anything that learns the
+    /// short code before the match runs writes it here: a Universal Link the
+    /// app was opened with, or a host app that carried it across its own
+    /// web-to-app handoff via `Dyplink.shared.setDeferredCookieRef`.
+    var pendingCookieRef: String? {
+        get { defaults.string(forKey: Keys.pendingCookieRef) }
+        set { defaults.set(newValue, forKey: Keys.pendingCookieRef) }
+    }
+
     // ── Attribution ────────────────────────────────────────────────────
 
     var attributedShortCode: String? {
@@ -76,6 +90,7 @@ internal final class DyplinkPreferences {
         for key in [
             Keys.anonymousId, Keys.deviceFingerprint, Keys.identifiedId,
             Keys.deferredMatchAttempted, Keys.deferredMatchResult,
+            Keys.pendingCookieRef,
             Keys.attributedShortCode, Keys.attributedLinkId,
             Keys.lastSessionTimestamp,
         ] {
@@ -91,6 +106,7 @@ internal final class DyplinkPreferences {
         static let identifiedId = "dyplink_identified_id"
         static let deferredMatchAttempted = "dyplink_deferred_match_attempted"
         static let deferredMatchResult = "dyplink_deferred_match_result"
+        static let pendingCookieRef = "dyplink_pending_cookie_ref"
         static let attributedShortCode = "dyplink_attributed_short_code"
         static let attributedLinkId = "dyplink_attributed_link_id"
         static let lastSessionTimestamp = "dyplink_last_session_timestamp"

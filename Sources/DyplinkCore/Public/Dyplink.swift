@@ -235,6 +235,7 @@ public final class Dyplink: @unchecked Sendable {
         try? checkInitialized()
         guard let result = universalLinkParser?.parse(url) else { return nil }
 
+        rememberDeferredCookieRef(result.shortCode)
         notifyDeepLinkListeners(result)
         trackDeepLinkOpened(result)
 
@@ -262,6 +263,7 @@ public final class Dyplink: @unchecked Sendable {
         let result = universalLinkParser?.parse(url)
             ?? DeepLinkResult(url: url.absoluteString, isDeferred: false)
 
+        rememberDeferredCookieRef(result.shortCode)
         notifyDeepLinkListeners(result)
         trackDeepLinkOpened(result)
 
@@ -288,6 +290,24 @@ public final class Dyplink: @unchecked Sendable {
             notifyDeepLinkListeners(deepLinkResult)
         }
         return result
+    }
+
+    /// Offer a short code for the deferred match to try as `cookieRef`.
+    ///
+    /// The server tries `cookieRef` before the fingerprint and it names the
+    /// link outright, where a fingerprint match is a correlation over a 48
+    /// hour window. Android gets one from the Play Install Referrer; iOS has
+    /// no equivalent, so an app that carries the short code across its own
+    /// web-to-app handoff — a code pasted into onboarding, one fetched from
+    /// the app's own backend — can hand it over here.
+    ///
+    /// Call before `matchDeferredDeepLink()`; the match happens once per
+    /// install and ignores anything that arrives after it. A short code the
+    /// SDK sees itself, from a Universal Link opened before the match ran,
+    /// is remembered without this.
+    public func setDeferredCookieRef(_ shortCode: String) {
+        try? checkInitialized()
+        rememberDeferredCookieRef(shortCode)
     }
 
     /// The attributed short code from the most recent deferred match, if any.
@@ -324,6 +344,18 @@ public final class Dyplink: @unchecked Sendable {
         if let listener = deepLinkListener {
             listener.dyplink(self, didReceive: result)
         }
+    }
+
+    /// Keeps a short code for the deferred match to offer as `cookieRef`.
+    ///
+    /// Only until the match has run: it happens once per install, and a code
+    /// kept past it would be sent on a match that can no longer happen.
+    private func rememberDeferredCookieRef(_ shortCode: String?) {
+        guard let shortCode = shortCode, !shortCode.isEmpty,
+              let preferences = preferences,
+              !preferences.deferredMatchAttempted
+        else { return }
+        preferences.pendingCookieRef = shortCode
     }
 
     /// Auto-track an opened deep link.

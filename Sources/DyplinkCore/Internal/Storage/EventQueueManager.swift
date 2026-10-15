@@ -93,18 +93,8 @@ internal final class EventQueueManager {
     /// - 5xx/transport → schedule retry
     func flush() async {
         // Drop overlapping flush runs.
-        lock.lock()
-        if isFlushInFlight {
-            lock.unlock()
-            return
-        }
-        isFlushInFlight = true
-        lock.unlock()
-        defer {
-            lock.lock()
-            isFlushInFlight = false
-            lock.unlock()
-        }
+        guard beginFlush() else { return }
+        defer { endFlush() }
 
         let batch = store.getNextBatch()
         if batch.isEmpty { return }
@@ -121,7 +111,22 @@ internal final class EventQueueManager {
                 let code = response.statusCode
                 if (200...299).contains(code) || (400...499).contains(code) {
                     store.deleteByIds([event.id])
-                    DyplinkLogger.d("EventQueueManager: event \(event.id) completed (HTTP \(code))")
+                    if (400...499).contains(code) {
+                        // A 4xx is terminal — the event is deleted, not
+                        // retried — so this is the last moment it exists.
+                        // Logged at error level, and with the body, because
+                        // the body is the only thing that says what was
+                        // wrong with it: a conversion refused for one
+                        // unexpected key was dropped here, every time, in
+                        // total silence.
+                        DyplinkLogger.e(
+                            "EventQueueManager: \(event.eventType) event dropped — "
+                            + "\(event.endpoint) answered HTTP \(code): "
+                            + "\(response.bodyString ?? "<no body>")"
+                        )
+                    } else {
+                        DyplinkLogger.d("EventQueueManager: event \(event.id) completed (HTTP \(code))")
+                    }
                 } else {
                     scheduleRetry(event)
                 }
@@ -138,6 +143,29 @@ internal final class EventQueueManager {
     func pendingCount() -> Int { store.count() }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    /// Claims the single flush slot, or answers `false` when a flush is
+    /// already running.
+    ///
+    /// Taking the lock in a synchronous method of its own rather than inside
+    /// `flush` is deliberate: `NSLock.lock()` is unavailable from an async
+    /// context, because a lock held across an `await` can deadlock when the
+    /// continuation resumes on the thread that holds it. Nothing here is held
+    /// across an `await` — the flag is read and written and the lock dropped
+    /// — so the fix is to say so in the type system rather than to change how
+    /// the flag is guarded.
+    private func beginFlush() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if isFlushInFlight { return false }
+        isFlushInFlight = true
+        return true
+    }
+
+    /// Releases the flush slot claimed by `beginFlush`.
+    private func endFlush() {
+        lock.lock(); defer { lock.unlock() }
+        isFlushInFlight = false
+    }
 
     private func scheduleRetry(_ event: EventQueueEntry) {
         let backoffMs = min(

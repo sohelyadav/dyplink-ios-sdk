@@ -62,7 +62,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DyplinkBannersTests",
-            dependencies: ["DyplinkBanners"],
+            dependencies: ["DyplinkBanners", "DyplinkCore"],
             path: "Tests/DyplinkBannersTests"
         ),
 
@@ -74,7 +74,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DyplinkMessagesTests",
-            dependencies: ["DyplinkMessages"],
+            dependencies: ["DyplinkMessages", "DyplinkCore"],
             path: "Tests/DyplinkMessagesTests"
         ),
     ]

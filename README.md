@@ -87,8 +87,10 @@ try await DyplinkPush.shared.registerToken(deviceToken)   // Data or String
 // notification, it reports what it is handed.
 DyplinkPush.shared.reportNotificationDelivered(userInfo: userInfo)
 
-// A tap also hands back the campaign's destination, if it has one.
-if let destination = DyplinkPush.shared.reportNotificationClicked(userInfo: userInfo) {
+// A tap, from `didReceive(_:withCompletionHandler:)`. Reports the click —
+// carrying which button was pressed, when one was — and hands back where it
+// leads, if anywhere.
+if let destination = DyplinkPush.shared.reportNotificationResponse(response) {
     router.go(destination)
 }
 ```
@@ -115,10 +117,32 @@ the carousel never draws.
 
 ### Action buttons
 
-A notification's buttons come from a `UNNotificationCategory` the app
-registers at launch — iOS cannot build them from a payload. So a campaign
-sends a category *name*, and the app has to have registered a category under
-that name with the buttons in it. Nothing the SDK can do for you here.
+A notification's buttons come from a `UNNotificationCategory` — iOS cannot
+build them from a payload, it only draws the buttons of the category the
+notification names. A campaign's buttons are authored in the dashboard, so
+there is no category for them to name, and the notification **service**
+extension above is what closes the gap: it registers a category carrying the
+campaign's `dyplink_actions` while the push is in flight. Add that extension
+and the buttons appear; the host app's own categories are left untouched.
+
+Which category they go onto matters when the campaign also names an iOS
+category for a content extension (a carousel or a countdown). A notification
+has only one category identifier, and the content extension is matched on
+that string — so the buttons are registered **onto the category the campaign
+names**, rather than onto an identifier of the SDK's own, and both the
+buttons and the carousel survive. Only that category's actions are replaced;
+its intent identifiers, options and hidden-preview copy are kept. Note that
+a category is app-wide: while a campaign's buttons are attached to an
+identifier, any other notification naming it shows them too.
+
+Two things outside the SDK decide whether they ever get the chance:
+
+- `aps` must carry `mutable-content: 1`, or iOS never wakes the extension.
+- A pressed button is reported as `metadata.actionId`, matching Android, but
+  only if the tap is reported through `reportNotificationResponse(_:)` (or
+  `reportNotificationClicked(userInfo:actionIdentifier:)`). The plain
+  `reportNotificationClicked(userInfo:)` cannot tell a button from the
+  notification body, because `userInfo` does not say.
 
 ## Related SDKs
 
