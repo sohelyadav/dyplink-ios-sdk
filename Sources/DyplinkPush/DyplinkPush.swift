@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 import DyplinkCore
 
 /// Optional push notification module for the Dyplink iOS SDK.
@@ -42,10 +43,11 @@ import DyplinkCore
 /// func userNotificationCenter(_ center: UNUserNotificationCenter,
 ///                              didReceive response: UNNotificationResponse,
 ///                              withCompletionHandler completionHandler: @escaping () -> Void) {
-///     // Reports the click and delivers the campaign's deep link, if any,
-///     // to `Dyplink.shared.onDeepLink`. The destination is also returned:
-///     //   let url = DyplinkPush.shared.reportNotificationClicked(userInfo: ...)
-///     DyplinkPush.shared.reportNotificationClicked(userInfo: response.notification.request.content.userInfo)
+///     // Reports the click — carrying the action id when one of the
+///     // campaign's buttons was pressed — and delivers the destination to
+///     // `Dyplink.shared.onDeepLink`. It is also returned:
+///     //   let url = DyplinkPush.shared.reportNotificationResponse(response)
+///     DyplinkPush.shared.reportNotificationResponse(response)
 ///     completionHandler()
 /// }
 ///
@@ -144,10 +146,18 @@ public final class DyplinkPush: @unchecked Sendable {
     /// Report that the user tapped a Dyplink campaign push notification and
     /// route the destination URL the campaign carries, if any.
     ///
-    /// Call from `userNotificationCenter(_:didReceive:withCompletionHandler:)`.
-    /// Returns that destination URL, so an app that would rather route taps
-    /// itself can do so without subscribing to `Dyplink.shared.onDeepLink`,
-    /// or `nil` when the push carries none.
+    /// Call from `userNotificationCenter(_:didReceive:withCompletionHandler:)`,
+    /// or let `reportNotificationResponse(_:)` do it. Returns that
+    /// destination URL, so an app that would rather route taps itself can do
+    /// so without subscribing to `Dyplink.shared.onDeepLink`, or `nil` when
+    /// the push carries none.
+    ///
+    /// Pass `actionIdentifier` when the tap came from one of the campaign's
+    /// buttons — `UNNotificationResponse.actionIdentifier`. It is reported as
+    /// `metadata.actionId`, the field Android sends, so the dashboard can
+    /// tell "pressed Buy now" from "tapped the notification"; and the
+    /// button's own destination takes precedence over the campaign's, as it
+    /// does on Android.
     ///
     /// The two halves are independent: reporting does nothing when `userInfo`
     /// carries no Dyplink campaign id, routing does nothing when it carries no
@@ -155,9 +165,40 @@ public final class DyplinkPush: @unchecked Sendable {
     /// say — leaves the other untouched. Fire-and-forget: never throws, never
     /// blocks.
     @discardableResult
-    public func reportNotificationClicked(userInfo: [AnyHashable: Any]) -> String? {
-        reportEvent(.click, userInfo: userInfo)
-        return routeDeepLink(userInfo: userInfo)
+    public func reportNotificationClicked(
+        userInfo: [AnyHashable: Any],
+        actionIdentifier: String? = nil
+    ) -> String? {
+        let actionId = Self.campaignActionId(actionIdentifier)
+        reportEvent(.click, userInfo: userInfo, actionId: actionId)
+        return routeDeepLink(userInfo: userInfo, actionId: actionId)
+    }
+
+    /// Report a notification response and route where it leads.
+    ///
+    /// The whole of `userNotificationCenter(_:didReceive:withCompletionHandler:)`
+    /// in one call, and the one to prefer there — it tells the three kinds of
+    /// response apart, which the raw `userInfo` cannot:
+    ///
+    /// - a tap on one of the campaign's buttons reports a `click` carrying
+    ///   that button's id, and routes the button's own destination;
+    /// - a tap on the notification itself reports a plain `click`;
+    /// - clearing it away reports `dismissed` and routes nothing, since the
+    ///   user chose not to go there.
+    ///
+    /// Returns the destination it routed, or `nil` when there was none.
+    @discardableResult
+    public func reportNotificationResponse(_ response: UNNotificationResponse) -> String? {
+        let userInfo = response.notification.request.content.userInfo
+
+        if response.actionIdentifier == UNNotificationDismissActionIdentifier {
+            reportEvent(.dismissed, userInfo: userInfo)
+            return nil
+        }
+        return reportNotificationClicked(
+            userInfo: userInfo,
+            actionIdentifier: response.actionIdentifier
+        )
     }
 
     /// Report an arbitrary push engagement event — for `impression` and
@@ -180,11 +221,19 @@ public final class DyplinkPush: @unchecked Sendable {
     /// this duplicate routing an app already does: the data keys aren't public
     /// API, so an app never told about them can't be reading them out of
     /// `userInfo` today.
-    private func routeDeepLink(userInfo: [AnyHashable: Any]) -> String? {
+    private func routeDeepLink(userInfo: [AnyHashable: Any], actionId: String? = nil) -> String? {
         guard isInitialized else { return nil }
+
+        // A button's own destination wins over the campaign's, and falls
+        // back to it when the button has none — the order Android's
+        // `PushNotificationHandler` builds its action intents in.
+        let buttonDestination = actionId
+            .flatMap { DyplinkPushActions.action(withId: $0, in: userInfo) }
+            .flatMap(\.deepLinkUrl)
+
         // `userInfo` comes from the OS untyped — every key may be absent or
         // hold something other than the string we expect.
-        guard let raw = Self.deepLinkUrlKeys
+        guard let raw = buttonDestination ?? Self.deepLinkUrlKeys
             .lazy
             .compactMap({ userInfo[$0] as? String })
             .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
@@ -198,15 +247,39 @@ public final class DyplinkPush: @unchecked Sendable {
         return raw
     }
 
-    private func reportEvent(_ event: PushEvent, userInfo: [AnyHashable: Any]) {
+    private func reportEvent(
+        _ event: PushEvent,
+        userInfo: [AnyHashable: Any],
+        actionId: String? = nil
+    ) {
         guard isInitialized else { return }
         guard let campaignId = userInfo[Self.campaignIdKey] as? String else {
             // Not a Dyplink campaign push — nothing to report.
             return
         }
         Task {
-            await eventReporter.report(campaignId: campaignId, type: event.rawValue)
+            await eventReporter.report(
+                campaignId: campaignId,
+                type: event.rawValue,
+                actionId: actionId
+            )
         }
+    }
+
+    /// The campaign's own action id, or `nil` for the system identifiers.
+    ///
+    /// `UNNotificationDefaultActionIdentifier` is iOS saying "the
+    /// notification itself was tapped", not the id of a button — reporting
+    /// it as one would invent a button called
+    /// `com.apple.UNNotificationDefaultActionIdentifier` in every campaign's
+    /// per-action breakdown.
+    private static func campaignActionId(_ actionIdentifier: String?) -> String? {
+        guard let actionIdentifier = actionIdentifier,
+              actionIdentifier != UNNotificationDefaultActionIdentifier,
+              actionIdentifier != UNNotificationDismissActionIdentifier,
+              !actionIdentifier.isEmpty
+        else { return nil }
+        return actionIdentifier
     }
 
     /// Test-only reset.

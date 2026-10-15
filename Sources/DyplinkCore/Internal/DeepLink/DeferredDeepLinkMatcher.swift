@@ -2,11 +2,17 @@ import Foundation
 
 /// Performs a server-side deferred deep link match.
 ///
-/// Mirrors the Android `DeferredDeepLinkMatcher` with one key
-/// difference: iOS has no equivalent of Google Play's Install Referrer
-/// API, so the `cookieRef` field is always nil. Matching on iOS relies
-/// purely on the device fingerprint (os/osVersion/model/screen) + IP
-/// correlation performed by the server.
+/// Mirrors the Android `DeferredDeepLinkMatcher`. iOS has no equivalent of
+/// Google Play's Install Referrer API, so there is nothing that *always*
+/// supplies a `cookieRef` here — but when something has supplied one
+/// (`DyplinkPreferences.pendingCookieRef`) it is sent, because the server
+/// tries it first and it names the link outright. Without one the match
+/// rests on the fingerprint the server correlates against recent clicks:
+/// `os`, `osVersion`, `model` and screen size, plus the request's own IP.
+///
+/// The IP is deliberately not in the body. The server reads it off the
+/// request, so a client that sent its own would be claiming an address it
+/// was never at — which is attribution theft, not a fingerprint.
 internal final class DeferredDeepLinkMatcher {
     private let requestExecutor: RequestExecutor
     private let deviceInfoCollector: DeviceInfoCollector
@@ -41,26 +47,10 @@ internal final class DeferredDeepLinkMatcher {
     // ── Private implementation ─────────────────────────────────────────
 
     private func performMatch() async throws -> DeferredMatchResult {
-        let deviceInfo = deviceInfoCollector.collect()
-
-        var body: [String: Any] = [:]
-
-        let os = deviceInfo["os"] as? String ?? "iOS"
-        let osVersion = deviceInfo["osVersion"] as? String ?? ""
-        let model = deviceInfo["model"] as? String ?? ""
-        let screenWidth = deviceInfo["screenWidth"] as? Int ?? 0
-        let screenHeight = deviceInfo["screenHeight"] as? Int ?? 0
-
-        if !os.isEmpty || !model.isEmpty {
-            body["fingerprint"] = [
-                "os": os,
-                "osVersion": osVersion,
-                "model": model,
-                "screenWidth": screenWidth,
-                "screenHeight": screenHeight,
-            ] as [String: Any]
-        }
-
+        let body = Self.requestBody(
+            deviceInfo: deviceInfoCollector.collect(),
+            cookieRef: preferences.pendingCookieRef
+        )
         let data = try JSONUtils.encode(body)
         let response = try await requestExecutor.post("/api/deferred/match", jsonBody: data)
 
@@ -96,7 +86,51 @@ internal final class DeferredDeepLinkMatcher {
             preferences.attributedLinkId = linkId
         }
 
+        // The ref has had its one chance, whatever came of it.
+        preferences.pendingCookieRef = nil
+
         return result
+    }
+
+    /// Builds the `/api/deferred/match` body.
+    ///
+    /// Internal so the shape can be tested without a server: everything that
+    /// decides whether a match is even possible is decided here, and the
+    /// failure mode is a plain `matched: false` that looks exactly like a
+    /// device the server has never seen.
+    ///
+    /// `DeferredMatchDto` takes `fingerprint` and `cookieRef` and nothing
+    /// else — the API's validation pipe runs with `forbidNonWhitelisted`, so
+    /// one extra top-level key makes the whole request a 400.
+    internal static func requestBody(
+        deviceInfo: [String: Any],
+        cookieRef: String?
+    ) -> [String: Any] {
+        var body: [String: Any] = [:]
+
+        let os = deviceInfo["os"] as? String ?? "iOS"
+        let osVersion = deviceInfo["osVersion"] as? String ?? ""
+        let model = deviceInfo["model"] as? String ?? ""
+        let screenWidth = deviceInfo["screenWidth"] as? Int ?? 0
+        let screenHeight = deviceInfo["screenHeight"] as? Int ?? 0
+
+        if !os.isEmpty || !model.isEmpty {
+            body["fingerprint"] = [
+                "os": os,
+                "osVersion": osVersion,
+                "model": model,
+                "screenWidth": screenWidth,
+                "screenHeight": screenHeight,
+            ] as [String: Any]
+        }
+
+        // Omitted rather than null when there is none: `@IsString()` on a
+        // present key is a 400 for anything that is not a string.
+        if let ref = cookieRef?.trimmingCharacters(in: .whitespacesAndNewlines), !ref.isEmpty {
+            body["cookieRef"] = ref
+        }
+
+        return body
     }
 
     private func parseCachedResult() -> DeferredMatchResult {

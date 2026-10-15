@@ -52,7 +52,6 @@ internal final class RequestExecutor {
         }
 
         var attempt = 0
-        var lastTransportError: Error?
 
         while true {
             do {
@@ -82,7 +81,6 @@ internal final class RequestExecutor {
                 try? await Task.sleep(nanoseconds: backoff)
                 attempt += 1
             } catch {
-                lastTransportError = error
                 if attempt >= maxRetries {
                     throw DyplinkError.networkError(
                         message: "Network request failed after \(attempt + 1) attempts: \(error.localizedDescription)",

@@ -5,6 +5,13 @@ import DyplinkCore
 /// and tracks banner clicks via `POST /api/in-app-banners/:id/click`.
 ///
 /// Mirrors the Android `BannerApiClient`.
+///
+/// Both endpoints are behind `ApiKeyGuard`, and the guard is also what tells
+/// the server which project is asking — `serveScoped` refuses a category
+/// belonging to anyone else. So a request without `X-API-Key` is not a
+/// request with less context, it is a 401: for as long as this sent none,
+/// `BannerCarouselView` rendered nothing on any real deployment and not one
+/// banner click was ever recorded.
 internal final class BannerApiClient {
 
     func fetchBanners(categoryId: String) async throws -> BannerCategory {
@@ -15,14 +22,24 @@ internal final class BannerApiClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.addValue(DyplinkConfigBridge.apiKey, forHTTPHeaderField: "X-API-Key")
         request.timeoutInterval = 15
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // The body distinguishes the three ways this fails — no key, a
+            // key for another project, a category that is gone — and the
+            // caller's `catch` is the carousel quietly rendering nothing.
+            DyplinkDiagnostics.httpFailure(
+                "GET /api/in-app-banners/serve/\(categoryId)",
+                statusCode: code,
+                body: data
+            )
             throw DyplinkError.apiError(
                 message: "Failed to fetch banners",
-                statusCode: code
+                statusCode: code,
+                responseBody: String(data: data, encoding: .utf8)
             )
         }
 
@@ -36,9 +53,24 @@ internal final class BannerApiClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = Data()
+        request.addValue(DyplinkConfigBridge.apiKey, forHTTPHeaderField: "X-API-Key")
         request.timeoutInterval = 15
 
-        _ = try? await URLSession.shared.data(for: request)
+        // Fire-and-forget — a lost click must not interrupt the tap it
+        // belongs to — but not silent, or a module whose every request is
+        // refused looks exactly like one nobody taps.
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                DyplinkDiagnostics.httpFailure(
+                    "POST /api/in-app-banners/\(bannerId)/click",
+                    statusCode: http.statusCode,
+                    body: data
+                )
+            }
+        } catch {
+            DyplinkDiagnostics.transportFailure("POST /api/in-app-banners/\(bannerId)/click", error)
+        }
     }
 
     // ── JSON parsing ───────────────────────────────────────────────────

@@ -57,8 +57,18 @@ final class InAppMessageRenderingTests: XCTestCase {
         )
     }
 
-    private func card(_ message: InAppMessage, compact: Bool = false) -> InAppMessageView {
-        InAppMessageView(message: message, compact: compact, onButtonTapped: { _ in })
+    private func card(
+        _ message: InAppMessage,
+        compact: Bool = false,
+        showsCloseButton: Bool = false
+    ) -> InAppMessageView {
+        InAppMessageView(
+            message: message,
+            compact: compact,
+            showsCloseButton: showsCloseButton,
+            onButtonTapped: { _ in },
+            onClose: {}
+        )
     }
 
     private func stack(of view: InAppMessageView) throws -> UIStackView {
@@ -206,7 +216,9 @@ final class InAppMessageRenderingTests: XCTestCase {
         let view = InAppMessageView(
             message: message(buttons: [button("go", "deep_link")]),
             compact: false,
-            onButtonTapped: { tapped.append($0.id) }
+            showsCloseButton: false,
+            onButtonTapped: { tapped.append($0.id) },
+            onClose: {}
         )
         let tap = try XCTUnwrap(try stack(of: view).arrangedSubviews.compactMap { $0 as? UIButton }.first)
 
