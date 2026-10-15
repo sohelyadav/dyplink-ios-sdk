@@ -13,6 +13,7 @@ internal final class InAppMessageView: UIView {
 
     private let message: InAppMessage
     private let onButtonTapped: (MessageButton) -> Void
+    private let onClose: () -> Void
 
     private let stack = UIStackView()
     private var imageView: UIImageView?
@@ -22,10 +23,28 @@ internal final class InAppMessageView: UIView {
     /// than a modal, so the container says which it is.
     private let compact: Bool
 
-    init(message: InAppMessage, compact: Bool, onButtonTapped: @escaping (MessageButton) -> Void) {
+    /// Whether to draw the close control.
+    ///
+    /// On for every layout that takes the app over, and not a campaign
+    /// setting, because the campaign can legally ask for a message with no
+    /// buttons, no auto-dismiss and no tap-outside — three defaults away
+    /// from a modal at `.alert` window level that swallows every touch and
+    /// cannot be closed. That is not a message the user can ignore, it is an
+    /// app they have to force-quit.
+    private let showsCloseButton: Bool
+
+    init(
+        message: InAppMessage,
+        compact: Bool,
+        showsCloseButton: Bool,
+        onButtonTapped: @escaping (MessageButton) -> Void,
+        onClose: @escaping () -> Void
+    ) {
         self.message = message
         self.compact = compact
+        self.showsCloseButton = showsCloseButton
         self.onButtonTapped = onButtonTapped
+        self.onClose = onClose
         super.init(frame: .zero)
         build()
     }
@@ -57,10 +76,12 @@ internal final class InAppMessageView: UIView {
         addSubview(stack)
 
         let inset: CGFloat = compact ? 12 : 16
+        // Room for the close control, so the title does not run under it.
+        let trailingInset = inset + (showsCloseButton ? Self.closeButtonSize - inset / 2 : 0)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor, constant: inset),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -trailingInset),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
         ])
 
@@ -90,7 +111,64 @@ internal final class InAppMessageView: UIView {
             stack.addArrangedSubview(makeButton(button))
         }
 
+        // Last, so it is above the copy and the background picture both.
+        if showsCloseButton {
+            addCloseButton()
+        }
+
         loadImageIfNeeded()
+    }
+
+    /// The one control the campaign cannot take away.
+    ///
+    /// Not in the stack: it sits in the card's own corner, over the copy and
+    /// over a background picture both. 44pt square — Apple's minimum target
+    /// — so the tap lands, and the whole of it is the button rather than a
+    /// smaller glyph with dead space around it.
+    private func addCloseButton() {
+        let button = UIButton(
+            type: .system,
+            primaryAction: UIAction { [onClose] _ in onClose() }
+        )
+        let glyphColour = closeGlyphColour
+        if let glyph = UIImage(systemName: "xmark") {
+            button.setImage(
+                glyph.withConfiguration(
+                    UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+                ),
+                for: .normal
+            )
+            button.tintColor = glyphColour
+        } else {
+            // No SF Symbols is not a reason to ship a message nobody can close.
+            button.setTitle("✕", for: .normal)
+            button.setTitleColor(glyphColour, for: .normal)
+        }
+        // Faintly filled, so the glyph reads over a photograph as well as
+        // over the theme's own background colour.
+        button.backgroundColor = UIColor(white: 0.5, alpha: 0.18)
+        button.layer.cornerRadius = Self.closeButtonSize / 2
+        button.accessibilityLabel = Self.closeAccessibilityLabel
+        // So a host app's UI tests can find it, and so can ours.
+        button.accessibilityIdentifier = Self.closeAccessibilityIdentifier
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+
+        NSLayoutConstraint.activate([
+            button.topAnchor.constraint(equalTo: topAnchor, constant: Self.closeButtonMargin),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.closeButtonMargin),
+            button.widthAnchor.constraint(equalToConstant: Self.closeButtonSize),
+            button.heightAnchor.constraint(equalToConstant: Self.closeButtonSize),
+        ])
+    }
+
+    /// The theme chose its colours against its own background; a photograph
+    /// behind the card swallows a dark glyph entirely.
+    private var closeGlyphColour: UIColor {
+        if message.imagePosition == "background", message.imageUrl?.isEmpty == false {
+            return .white
+        }
+        return UIColor(dyplinkHex: message.theme?.titleColor) ?? .secondaryLabel
     }
 
     private func makeTitleLabel() -> UILabel {
@@ -205,6 +283,12 @@ internal final class InAppMessageView: UIView {
 
     /// Matches the Android SDK's, so one campaign looks like one campaign.
     private static let defaultCornerRadius = 12
+    /// Apple's minimum tap target, and the whole control is tappable.
+    static let closeButtonSize: CGFloat = 44
+    private static let closeButtonMargin: CGFloat = 4
+    private static let closeAccessibilityLabel = "Close"
+    /// How a test — ours or a host app's — finds the close control.
+    static let closeAccessibilityIdentifier = "dyplink.message.close"
     private static let accent = UIColor(red: 0.098, green: 0.463, blue: 0.824, alpha: 1) // #1976D2
     /// Black at 40%, dark enough for white copy over a bright photo.
     private static let backgroundScrim = UIColor(white: 0, alpha: 0.4)

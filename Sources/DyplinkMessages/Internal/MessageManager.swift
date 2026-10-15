@@ -12,9 +12,30 @@ internal final class MessageManager {
     let distinctIdProvider: () -> String?
     weak var messageListener: MessageListener?
 
-    /// Presenters for the messages currently on screen. Each owns the window
-    /// its message lives in, so something has to hold them.
-    private var presenters: [InAppMessagePresenter] = []
+    /// The message on screen. It owns the window its message lives in, so
+    /// something has to hold it — and let go of it again on every path out.
+    @MainActor
+    private var presenter: InAppMessagePresenter?
+
+    /// Eligible messages waiting their turn, highest priority first.
+    @MainActor
+    private var queue: [InAppMessage] = []
+
+    /// Set from the moment a message is taken off the queue until it leaves
+    /// the screen. Not the same as `presenter != nil`: a message with a
+    /// trigger delay is claimed seconds before it is built.
+    @MainActor
+    private var isPresenting = false
+
+    /// Ids queued or on screen.
+    ///
+    /// A check answers with every message that is eligible *now*, and
+    /// eligibility does not change until an impression has been recorded —
+    /// so `onAppOpen` followed by `onScreenView` hands back the same
+    /// messages, and without this the second copy would be shown again
+    /// after the first was dismissed.
+    @MainActor
+    private var pendingIds: Set<String> = []
 
     init(
         apiClient: MessageApiClient,
@@ -36,11 +57,45 @@ internal final class MessageManager {
                 distinctId: distinctIdProvider(),
                 context: context
             )
-            for message in messages {
-                await show(message)
-            }
+            await enqueue(messages)
         } catch {
-            // Never crash the host app.
+            // Never crash the host app — but never silently, either: a check
+            // that fails and a check that finds nobody eligible are the same
+            // thing from the outside.
+            DyplinkDiagnostics.error("In-app message check failed", error)
+        }
+    }
+
+    /// Queues what a check returned and starts the first of them.
+    ///
+    /// Internal rather than private so the queueing can be driven without a
+    /// server: a unit-test bundle has no foreground scene, which is also the
+    /// case this has to get right.
+    ///
+    /// The server sorts by priority descending and returns at most three.
+    /// They are shown one at a time in that order. Presenting all of them at
+    /// once — which is what this used to do — stacked three windows on top of
+    /// each other with the *lowest* priority message on top, and reported
+    /// three impressions for the one message anybody could read.
+    @MainActor
+    func enqueue(_ messages: [InAppMessage]) async {
+        let fresh = messages.filter { !pendingIds.contains($0.id) }
+        guard !fresh.isEmpty else { return }
+
+        queue.append(contentsOf: fresh)
+        pendingIds.formUnion(fresh.map(\.id))
+        presentNext()
+    }
+
+    /// Shows the highest-priority queued message, if nothing is showing.
+    @MainActor
+    private func presentNext() {
+        guard presenter == nil, !isPresenting, !queue.isEmpty else { return }
+
+        let message = queue.removeFirst()
+        isPresenting = true
+        Task { @MainActor [weak self] in
+            await self?.show(message)
         }
     }
 
@@ -51,22 +106,54 @@ internal final class MessageManager {
             try? await Task.sleep(nanoseconds: UInt64(message.triggerDelay) * 1_000_000_000)
         }
 
-        report(message, eventType: "impression")
-
         let presenter = InAppMessagePresenter(message: message) { [weak self] outcome in
-            self?.handle(outcome, for: message)
+            self?.finish(outcome, for: message)
         }
+
         // Nothing else holds the presenter, and it owns the window the
-        // message lives in — dropping it here would take the message with it.
-        presenters.append(presenter)
-        presenter.present()
+        // message lives in — dropping it while it is showing would take the
+        // message with it.
+        guard presenter.present() else {
+            // Nothing reached the screen, so there is no impression to
+            // report and nothing to hold: `present` produces no outcome on
+            // this path, so a presenter kept here would hold its `UIWindow`
+            // for the lifetime of the process with nothing ever coming to
+            // prune it.
+            DyplinkDiagnostics.debug(
+                "In-app message \(message.id) was not shown: no foreground window scene"
+            )
+            isPresenting = false
+            pendingIds.remove(message.id)
+            // Whatever stopped this one stops the rest — there is no scene
+            // to draw in — so they are dropped rather than held against a
+            // foreground that may never come. The next check offers them
+            // again, and none of them was reported as seen.
+            queue.removeAll()
+            pendingIds.removeAll()
+            return
+        }
+
+        self.presenter = presenter
+        report(message, eventType: "impression")
+    }
+
+    /// The message left the screen: let go of it, then show whatever is next.
+    @MainActor
+    private func finish(_ outcome: InAppMessagePresenter.Outcome, for message: InAppMessage) {
+        // The presenter keeps itself alive through its own dismissal
+        // animation, so releasing it here is safe and releasing it anywhere
+        // later is a window leaked.
+        presenter = nil
+        isPresenting = false
+        pendingIds.remove(message.id)
+
+        handle(outcome, for: message)
+        presentNext()
     }
 
     /// Records the outcome and lets the host app act on it.
     @MainActor
     private func handle(_ outcome: InAppMessagePresenter.Outcome, for message: InAppMessage) {
-        presenters.removeAll { $0.isFinished }
-
         switch outcome {
         case .dismissed:
             report(message, eventType: "dismiss")
@@ -121,5 +208,15 @@ internal final class MessageManager {
         guard let raw = raw, let url = URL(string: raw) else { return }
         UIApplication.shared.open(url)
     }
+
+    // ── Test hooks ─────────────────────────────────────────────────────
+
+    /// Whether a presenter — and so a `UIWindow` — is being held.
+    @MainActor
+    var isHoldingPresenter: Bool { presenter != nil }
+
+    /// How many messages are still waiting for their turn.
+    @MainActor
+    var queuedMessageCount: Int { queue.count }
 }
 #endif

@@ -59,15 +59,21 @@ internal final class InAppMessagePresenter {
 
     // ── Presenting ─────────────────────────────────────────────────────
 
-    /// Builds the window and shows the message. Does nothing, silently, when
-    /// there is no foreground scene to show it in — which is the right
-    /// answer for a message that arrived as the app went to the background.
+    /// Builds the window and shows the message.
+    ///
+    /// Answers `false` without doing anything when there is no foreground
+    /// scene to show it in — the right outcome for a message that arrived as
+    /// the app went to the background. The caller needs to be told, because
+    /// a message that was never on screen must not be reported as an
+    /// impression, and this presenter — which owns a `UIWindow` — has to be
+    /// released rather than waiting forever for an outcome it cannot produce.
     @MainActor
-    func present() {
+    @discardableResult
+    func present() -> Bool {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive })
-        else { return }
+        else { return false }
 
         let layout = Layout(messageType: message.messageType)
 
@@ -104,8 +110,14 @@ internal final class InAppMessagePresenter {
         let card = InAppMessageView(
             message: message,
             compact: layout.isCompact,
+            // Every layout that takes the app over gets one, whatever the
+            // campaign asked for. See `Layout.needsCloseButton`.
+            showsCloseButton: layout.needsCloseButton,
             onButtonTapped: { [weak self] button in
                 self?.finish(.buttonTapped(button))
+            },
+            onClose: { [weak self] in
+                self?.finish(.dismissed)
             }
         )
         card.translatesAutoresizingMaskIntoConstraints = false
@@ -118,6 +130,7 @@ internal final class InAppMessagePresenter {
         window.isHidden = false
         animateIn(layout: layout)
         armAutoDismiss(layout: layout)
+        return true
     }
 
     // ── Layout ─────────────────────────────────────────────────────────
@@ -149,6 +162,19 @@ internal final class InAppMessagePresenter {
             case .centre, .bottomSheet, .fullscreen: return true
             }
         }
+
+        /// Whether this layout must draw a close control.
+        ///
+        /// The three modal layouts, unconditionally, and that is the point.
+        /// Every way out of a message belongs to the campaign: it can send no
+        /// buttons (`buttons` is nullable), ask for no auto-dismiss
+        /// (`autoDismissSeconds` is `@Min(0)`) and switch off tap-outside
+        /// (`dismissOnTapOutside`) — three legal settings whose combination
+        /// left a modal sitting in an `.alert`-level window that swallows
+        /// every touch, with the app unusable until it was force-quit. A
+        /// banner needs none of this: it has no backdrop, touches go through
+        /// it to the app, and it leaves on its own after four seconds.
+        var needsCloseButton: Bool { hasBackdrop }
 
         /// A banner and a sheet have far less room for a picture.
         var isCompact: Bool {

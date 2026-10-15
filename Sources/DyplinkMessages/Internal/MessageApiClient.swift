@@ -53,7 +53,15 @@ internal final class MessageApiClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw DyplinkError.apiError(message: "checkMessages failed", statusCode: code)
+            // `checkAndShow` catches this and shows nothing, which is also
+            // what "nobody is eligible" looks like — so the body the server
+            // sent is the only thing that tells the two apart.
+            DyplinkDiagnostics.httpFailure("POST /api/messages/check", statusCode: code, body: data)
+            throw DyplinkError.apiError(
+                message: "checkMessages failed",
+                statusCode: code,
+                responseBody: String(data: data, encoding: .utf8)
+            )
         }
 
         return Self.parseMessages(from: data)
@@ -90,7 +98,21 @@ internal final class MessageApiClient {
         request.addValue(apiKey, forHTTPHeaderField: "X-API-Key")
         request.timeoutInterval = 15
 
-        _ = try? await URLSession.shared.data(for: request)
+        // Fire-and-forget: a lost impression must not cost the user the
+        // message. Reported, though — a campaign whose every event is
+        // refused reads in the dashboard as a campaign nobody saw.
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                DyplinkDiagnostics.httpFailure(
+                    "POST /api/messages/event (\(eventType))",
+                    statusCode: http.statusCode,
+                    body: data
+                )
+            }
+        } catch {
+            DyplinkDiagnostics.transportFailure("POST /api/messages/event (\(eventType))", error)
+        }
     }
 
     // ── Parsing ────────────────────────────────────────────────────────
@@ -125,7 +147,13 @@ internal final class MessageApiClient {
             buttons: parseButtons(json["buttons"] as? [[String: Any]]),
             theme: parseTheme(json["theme"] as? [String: Any]),
             dismissOnTapOutside: json["dismissOnTapOutside"] as? Bool ?? true,
-            autoDismissSeconds: (json["autoDismissSeconds"] as? Int).flatMap { $0 >= 0 ? $0 : nil },
+            // Zero is "no auto-dismiss" in the dashboard, and `@Min(0)` lets
+            // it through — but as an *explicit* zero it also suppressed the
+            // banner default, so a banner with no buttons arrived with
+            // nothing to close it. Absent and zero mean the same thing here:
+            // let the layout decide, which gives a banner its 4 seconds and
+            // leaves a modal open until the user closes it.
+            autoDismissSeconds: (json["autoDismissSeconds"] as? Int).flatMap { $0 > 0 ? $0 : nil },
             triggerDelay: json["triggerDelay"] as? Int ?? 0
         )
     }
